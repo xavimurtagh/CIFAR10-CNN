@@ -1,138 +1,241 @@
 import torch
-import torchvision
-import matplotlib.pyplot as plt
-import pandas as pd
-from torch import nn
-from torch.utils.data import DataLoader
-from torchvision import datasets
-from torchvision.transforms import ToTensor
-from torch.utils.data import random_split
-from torchvision.utils import make_grid
+import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, random_split
+from torch.optim import SGD
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
+# Enhanced Data Loading with Augmentation
+transform_train = transforms.Compose([
+    #transforms.RandomCrop(32, padding=4),
+    #transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+])
 
+transform_test = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+])
 
+# Load datasets
+train_data = torchvision.datasets.CIFAR10('./', download=True, train=True, transform=transform_train)
+test_data = torchvision.datasets.CIFAR10('./', download=True, train=False, transform=transform_test)
 
-data = torchvision.datasets.CIFAR10('./', download=False, train=True, transform=ToTensor())
-classes = data.classes
+# Split into train and validation
+train_data, val_data = random_split(train_data, [40000, 10000])
 
-'''class_count = {}
-for x,i in data:
-    label = classes[i]
-    if label not in class_count:
-        class_count[label] = 0
-    class_count[label] += 1
-'class_count = {}\nfor x,i in data:\n    label = classes[i]\n    if label not in class_count:\n        class_count[label] = 0\n    class_count[label] += 1\nclass_count
-print(class_count)
-'''
-
-train_data, val_data = random_split(data, [40000, 10000])
+# Data loaders
 batch_size = 64
 train_loader = DataLoader(train_data, batch_size, shuffle=True, num_workers=4)
-val_loader = DataLoader(val_data, batch_size*2, num_workers=4)
-for images, x in train_loader:
-    print('images.shape:', images.shape)
-    plt.figure(figsize=(16,8))
-    plt.axis('off')
-    plt.imshow(make_grid(images, nrow=16).permute((1, 2, 0)))
-    break
+val_loader = DataLoader(val_data, batch_size, num_workers=4)
+test_loader = DataLoader(test_data, batch_size, num_workers=2)
 
-def accuracy(outputs, labels):
-    _, pred = torch.max(outputs, dim=1)
-    return torch.tensor(torch.sum(pred == labels).item() / len(pred))
-
-
-class ImageClassificationBase(nn.Module):
-    def training_step(self, batch):
-        images, labels = batch 
-        out = self(images)                  
-        loss = F.cross_entropy(out, labels) 
-        return loss
-    
-    def validation_step(self, batch):
-        images, labels = batch 
-        out = self(images)                    
-        loss = F.cross_entropy(out, labels)   
-        acc = accuracy(out, labels)           
-        return {'val_loss': loss.detach(), 'val_acc': acc}
+class CIFAR10Model(nn.Module):
+    def __init__(self):
+        super().__init__()      
+        self.conv1 = nn.Conv2d(3, 12, 5) 
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(12, 24, 5) 
         
-    def validation_epoch_end(self, outputs):
-        batch_losses = [x['val_loss'] for x in outputs]
-        epoch_loss = torch.stack(batch_losses).mean()  
-        batch_accs = [x['val_acc'] for x in outputs]
-        epoch_acc = torch.stack(batch_accs).mean()      
-        return {'val_loss': epoch_loss.item(), 'val_acc': epoch_acc.item()}
-    
-    def epoch_end(self, epoch, result):
-        print("Epoch [{}], val_loss: {:.4f}, val_acc: {:.4f}".format(epoch, result['val_loss'], result['val_acc']))
-        
-def evaluate(model, val_loader):
-    outputs = [model.validation_step(batch) for batch in val_loader]
-    return model.validation_epoch_end(outputs)
+        self.dropout = nn.Dropout(0.2)
 
-def fit(epochs, lr, model, train_loader, val_loader, opt_func=torch.optim.SGD):
-    history = []
-    optimizer = opt_func(model.parameters(), lr)
-    for epoch in range(epochs):
-        # Training Phase 
-        for batch in train_loader:
-            loss = model.training_step(batch)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-        # Validation phase
-        result = evaluate(model, val_loader)
-        model.epoch_end(epoch, result)
-        history.append(result)
-    return history
-
-def plot_losses(history):
-    losses = [x['val_loss'] for x in history]
-    plt.plot(losses, '-x')
-    plt.xlabel('epoch')
-    plt.ylabel('loss')
-    plt.title('Loss vs. No. of epochs');
-
-def plot_accuracies(history):
-    accuracies = [x['val_acc'] for x in history]
-    plt.plot(accuracies, '-x')
-    plt.xlabel('epoch')
-    plt.ylabel('accuracy')
-    plt.title('Accuracy vs. No. of epochs');
+        self.fc1 = nn.Linear(24 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 64)
+        self.fc3 = nn.Linear(64, 10)
 
 
-input_size = 3*32*32
-output_size = 10
-class CIFAR10Model(ImageClassificationBase):
-    def __init__(self, input_size = 3*32*32, output_size = 10):
-        super().__init__()
-        self.linear1 = nn.Linear(input_size, 1024)
-        self.linear2 = nn.Linear(1024, 256)
-        self.linear3 = nn.Linear(256, 64)
-        self.linear4 = nn.Linear(64, output_size)
-        
     def forward(self, x):
-        output = x.view(x.size(0), -1)
-        output = self.linear1(output)
-        output = F.relu(output)
-        output = self.linear2(output)
-        output = F.relu(output)
-        output = self.linear3(output)
-        output = F.relu(output)
-        output = self.linear4(output)
-        return output
+        x = self.pool(F.relu(self.conv1(x))) 
+        x = self.pool(F.relu(self.conv2(x))) 
+        
+        #x = self.pool(F.relu(self.conv3(x))) # 128 * 6 * 6
+        #x = F.relu(self.conv4(x)) # -> 128 * 8 * 8
+        #x = self.pool(F.relu(self.conv5(x))) # 256 * 3 * 3
+        #x = self.pool(F.relu(self.conv6(x))) # -> 128 * 5 * 5
+        
+        x = torch.flatten(x,1)
+        x = F.relu(self.fc1(x))
+        #x = self.dropout(x)
+        x = F.relu(self.fc2(x))
+        #x = self.dropout(x)
+        x = self.fc3(x)
+
+        return x
     
+net = CIFAR10Model()
+loss_function = nn.CrossEntropyLoss()
+optimizer = torch.optim.SGD(net.parameters(), lr=0.01, momentum=0.9)
 
-model = CIFAR10Model()
-history = [evaluate(model, val_loader)]
+for epoch in range(10):
+    print(f'Epoch {epoch}:')
+    running_loss = 0
+    
+    for i, data in enumerate(train_loader):
+        inputs, labels = data
+        
+        optimizer.zero_grad()
+        
+        outputs = net(inputs)
+        
+        loss = loss_function(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        
+    print(f'Loss: {running_loss / len(train_loader):.4f}')
+    
+correct = 0
+total = 0
+
+net.eval()
+
+with torch.no_grad():
+    for data in test_loader:
+        images, labels = data
+        outputs = net(images)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+accuracy = 100 * correct/total
+print(f'Test Accuracy: {accuracy:.2f}%')
 
 
-history += fit(10, 1e-1, model, train_loader, val_loader)
-history += fit(10, 1e-2, model, train_loader, val_loader)
-history += fit(10, 1e-3, model, train_loader, val_loader)
-history += fit(10, 1e-4, model, train_loader, val_loader)
-plot_losses(history)
-plot_accuracies(history)
-test_data = torchvision.datasets.CIFAR10('./', download=False, train=False, transform=ToTensor())
-test_loader = DataLoader(test_data, batch_size*2, num_workers=4)
-evaluate(model, test_loader)
+optimizer = torch.optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
+for epoch in range(12):
+    print(f'Epoch {epoch}:')
+    running_loss = 0
+    
+    for i, data in enumerate(train_loader):
+        inputs, labels = data
+        
+        optimizer.zero_grad()
+        
+        outputs = net(inputs)
+        
+        loss = loss_function(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        
+    print(f'Loss: {running_loss / len(train_loader):.4f}')
+    
+correct = 0
+total = 0
+
+net.eval()
+
+with torch.no_grad():
+    for data in test_loader:
+        images, labels = data
+        outputs = net(images)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+accuracy = 100 * correct/total
+print(f'Test Accuracy: {accuracy:.2f}%')
+
+
+optimizer = torch.optim.SGD(net.parameters(), lr=0.0001, momentum=0.9)
+
+for epoch in range(10):
+    print(f'Epoch {epoch}:')
+    running_loss = 0
+    
+    for i, data in enumerate(train_loader):
+        inputs, labels = data
+        
+        optimizer.zero_grad()
+        
+        outputs = net(inputs)
+        
+        loss = loss_function(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        
+    print(f'Loss: {running_loss / len(train_loader):.4f}')
+    
+correct = 0
+total = 0
+
+net.eval()
+
+with torch.no_grad():
+    for data in test_loader:
+        images, labels = data
+        outputs = net(images)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+accuracy = 100 * correct/total
+print(f'Test Accuracy: {accuracy:.2f}%')
+
+
+optimizer = torch.optim.SGD(net.parameters(), lr=0.00001, momentum=0.9)
+
+for epoch in range(5):
+    print(f'Epoch {epoch}:')
+    running_loss = 0
+    
+    for i, data in enumerate(train_loader):
+        inputs, labels = data
+        
+        optimizer.zero_grad()
+        
+        outputs = net(inputs)
+        
+        loss = loss_function(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        
+    print(f'Loss: {running_loss / len(train_loader):.4f}')
+
+
+correct = 0
+total = 0
+
+net.eval()
+
+with torch.no_grad():
+    for data in test_loader:
+        images, labels = data
+        outputs = net(images)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+accuracy = 100 * correct/total
+print(f'Test Accuracy: {accuracy:.2f}%')
+
+with torch.no_grad():
+    for data in val_loader:
+        images, labels = data
+        outputs = net(images)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+accuracy = 100 * correct/total
+print(f'Test Accuracy: {accuracy:.2f}%')
+
+
+correct = 0
+total = 0
+
+net.eval()
+
+with torch.no_grad():
+    for data in train_loader:
+        images, labels = data
+        outputs = net(images)
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+accuracy = 100 * correct/total
+print(f'Test Accuracy: {accuracy:.2f}%')
